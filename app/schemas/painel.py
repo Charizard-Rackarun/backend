@@ -86,6 +86,7 @@ class Reward(CamelModel):
     category: str
     expires: str
     code: str
+    cost_points: int
 
 
 class RewardSummary(CamelModel):

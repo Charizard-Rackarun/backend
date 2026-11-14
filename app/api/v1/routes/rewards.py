@@ -7,7 +7,7 @@ from app.api.deps import DbSession, VisitanteOpcional
 from app.models import Cupom, Estabelecimento, Resgate, Visitante
 from app.schemas.gestao import ResgateCreate, ResgateResposta
 from app.schemas.painel import Reward, RewardSummary
-from app.services import tempo
+from app.services import sexta13, tempo
 from app.services.formatacao import data_curta
 from app.services.visitantes import nivel_para
 
@@ -22,12 +22,15 @@ async def carteira(db: DbSession, visitante: VisitanteOpcional):
         select(Cupom, Estabelecimento.nome)
         .join(Estabelecimento, Estabelecimento.id == Cupom.estabelecimento_id)
         .where(Cupom.ativo.is_(True), Cupom.validade >= hoje)
-        .order_by(Cupom.id)
+        .order_by(Cupom.custo_pontos, Cupom.id)  # os mais baratos primeiro
     )
+    if not sexta13.eh_sexta_13(hoje):
+        consulta = consulta.where(Cupom.exclusivo_sexta_13.is_(False))  # ofertas secretas ficam ocultas
     cupons = [
         Reward(
             id=c.id, title=c.titulo, store=loja, description=c.descricao, discount=c.desconto,
             category=c.categoria, expires=data_curta(c.validade), code=c.codigo,
+            cost_points=c.custo_pontos,
         )
         for c, loja in (await db.execute(consulta)).all()
         if c.estoque is None or c.estoque > 0
@@ -53,6 +56,8 @@ async def resgatar(dados: ResgateCreate, db: DbSession, visitante: VisitanteOpci
     hoje = tempo.hoje()
     if cupom is None or not cupom.ativo or cupom.validade < hoje:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Cupom indisponível")
+    if cupom.exclusivo_sexta_13 and not sexta13.eh_sexta_13(hoje):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Esta oferta secreta só está disponível nas Sextas 13")
     if cupom.estoque is not None and cupom.estoque <= 0:
         raise HTTPException(status.HTTP_409_CONFLICT, "Cupom esgotado")
     if saldo.pontos < cupom.custo_pontos:

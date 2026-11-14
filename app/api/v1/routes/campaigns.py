@@ -7,7 +7,7 @@ from app.api.deps import CurrentEstabelecimento, DbSession
 from app.models import Campanha, Cupom, Resgate
 from app.schemas.gestao import CampanhaCreate
 from app.schemas.painel import Campaign
-from app.services import tempo
+from app.services import sexta13, tempo
 from app.services.formatacao import data_br
 
 router = APIRouter(prefix="/campaigns", tags=["Campanhas"])
@@ -41,6 +41,20 @@ async def listar(estabelecimento: CurrentEstabelecimento, db: DbSession):
     )).all())
     itens = [_para_schema(c, resgates.get(c.id, 0), hoje) for c in campanhas]
 
+    # Campanha automática do desafio: aparece sempre, ativa nas Sextas 13
+    ativo = sexta13.eh_sexta_13(hoje)
+    data_evento = hoje if ativo else sexta13.proxima_sexta_13(hoje)
+    resgates_evento = await db.scalar(
+        select(func.count(Resgate.id))
+        .select_from(Resgate)
+        .join(Cupom, Cupom.id == Resgate.cupom_id)
+        .where(Cupom.estabelecimento_id == estabelecimento.id, Cupom.exclusivo_sexta_13.is_(True))
+    ) or 0
+    itens.append(Campaign(
+        id="sexta-13", name=sexta13.NOME_EVENTO, store="Todas as participantes", type="Evento especial",
+        status="Ativa" if ativo else "Agendada", reach=0, redemptions=resgates_evento,
+        start_date=data_br(data_evento), end_date=data_br(data_evento), discount="Ofertas secretas",
+    ))
     return itens
 
 

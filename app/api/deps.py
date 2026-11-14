@@ -1,14 +1,15 @@
 from typing import Annotated
 
 import jwt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, Header, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.core.security import ALGORITHM
+from app.core.security import ALGORITHM, hash_token
 from app.db.session import get_db
-from app.models import Estabelecimento
+from app.models import Estabelecimento, Visitante
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
 
@@ -34,4 +35,14 @@ async def get_current_estabelecimento(
     return estabelecimento
 
 
+async def get_visitante_opcional(
+    db: DbSession, x_visitante_token: Annotated[str | None, Header()] = None
+) -> Visitante | None:
+    """Identifica o visitante anônimo pelo cabeçalho X-Visitante-Token, se enviado."""
+    if not x_visitante_token:
+        return None
+    return await db.scalar(select(Visitante).where(Visitante.token_hash == hash_token(x_visitante_token)))
+
+
 CurrentEstabelecimento = Annotated[Estabelecimento, Depends(get_current_estabelecimento)]
+VisitanteOpcional = Annotated[Visitante | None, Depends(get_visitante_opcional)]
