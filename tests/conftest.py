@@ -15,10 +15,13 @@ from app import models  # noqa: F401
 from app.db.base import Base
 from app.db.session import get_db
 from app.main import app
+from app.services import tempo
+from tests.helpers import DIA_COMUM
 
 
 @pytest.fixture
-async def client():
+async def client(monkeypatch):
+    monkeypatch.setattr(tempo, "hoje", lambda: DIA_COMUM)  # testes não dependem do dia real
     engine = create_async_engine(
         "sqlite+aiosqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False}
     )
