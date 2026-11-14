@@ -24,6 +24,7 @@ from app.schemas.questionario import (
     RespostaResultado,
     ResultadosQuestionario,
 )
+from app.services import sexta13
 
 router = APIRouter(prefix="/questionarios", tags=["Questionários (lojista)"])
 public_router = APIRouter(prefix="/public/questionarios", tags=["Questionários (visitante)"])
@@ -167,8 +168,8 @@ async def responder(
         for r in dados.respostas for opcao_id in r.opcao_ids
     )
 
-    bonus = False  # pontos em dobro na Sexta 13 entram na branch feat/backend-sexta-13
-    ganhos = q.pontos
+    bonus = sexta13.evento_ativo()
+    ganhos = q.pontos * (sexta13.MULTIPLICADOR_PONTOS if bonus else 1)
     await db.execute(
         update(Visitante).where(Visitante.id == visitante.id).values(pontos=Visitante.pontos + ganhos)
     )
