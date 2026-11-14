@@ -22,7 +22,7 @@ async def carteira(db: DbSession, visitante: VisitanteOpcional):
         select(Cupom, Estabelecimento.nome)
         .join(Estabelecimento, Estabelecimento.id == Cupom.estabelecimento_id)
         .where(Cupom.ativo.is_(True), Cupom.validade >= hoje)
-        .order_by(Cupom.id)
+        .order_by(Cupom.custo_pontos, Cupom.id)  # os mais baratos primeiro
     )
     if not sexta13.eh_sexta_13(hoje):
         consulta = consulta.where(Cupom.exclusivo_sexta_13.is_(False))  # ofertas secretas ficam ocultas
@@ -30,6 +30,7 @@ async def carteira(db: DbSession, visitante: VisitanteOpcional):
         Reward(
             id=c.id, title=c.titulo, store=loja, description=c.descricao, discount=c.desconto,
             category=c.categoria, expires=data_curta(c.validade), code=c.codigo,
+            cost_points=c.custo_pontos,
         )
         for c, loja in (await db.execute(consulta)).all()
         if c.estoque is None or c.estoque > 0

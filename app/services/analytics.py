@@ -52,7 +52,8 @@ async def carregar_cestas(db: AsyncSession) -> Cestas:
         .join(Opcao, Opcao.id == RespostaItem.opcao_id)
         .join(Pergunta, Pergunta.id == RespostaItem.pergunta_id)
         .join(Resposta, Resposta.id == RespostaItem.resposta_id)
-        .where(Pergunta.dimensao == "categoria")
+        # opções exclusivas ("Nenhuma das anteriores") não são categorias de interesse
+        .where(Pergunta.dimensao == "categoria", Opcao.exclusiva.is_(False))
     )
     nomes: dict[str, str] = {}
     por_resposta: dict[int, tuple[set[str], datetime]] = {}

@@ -6,6 +6,7 @@ from app.api.deps import CurrentEstabelecimento, DbSession, VisitanteOpcional
 from app.core.config import settings
 from app.core.security import generate_token, hash_token
 from app.models import (
+    Estabelecimento,
     Opcao,
     Pergunta,
     Questionario,
@@ -17,6 +18,8 @@ from app.schemas.questionario import (
     OpcaoResultado,
     PerguntaResultado,
     QuestionarioCreate,
+    QuestionarioPublico,
+    QuestionarioPublicoResumo,
     QuestionarioRead,
     QuestionarioResumo,
     QuestionarioStatus,
@@ -28,6 +31,8 @@ from app.services import sexta13
 
 router = APIRouter(prefix="/questionarios", tags=["Questionários (lojista)"])
 public_router = APIRouter(prefix="/public/questionarios", tags=["Questionários (visitante)"])
+
+SEGUNDOS_POR_PERGUNTA = 15
 
 
 async def _do_dono(db, questionario_id: int, estabelecimento_id: int) -> Questionario:
@@ -48,7 +53,8 @@ async def criar(dados: QuestionarioCreate, estabelecimento: CurrentEstabelecimen
         perguntas=[
             Pergunta(
                 texto=p.texto, tipo=p.tipo, dimensao=p.dimensao, ordem=i,
-                opcoes=[Opcao(texto=o.texto, ordem=j) for j, o in enumerate(p.opcoes)],
+                obrigatoria=p.obrigatoria, max_selecoes=p.max_selecoes,
+                opcoes=[Opcao(texto=o.texto, exclusiva=o.exclusiva, ordem=j) for j, o in enumerate(p.opcoes)],
             )
             for i, p in enumerate(dados.perguntas)
         ],
@@ -83,43 +89,90 @@ async def alterar_status(
     return QuestionarioStatus(ativo=q.ativo)
 
 
+def _resultado_pergunta(p: Pergunta, contagens: dict[int, int], respondentes: int) -> PerguntaResultado:
+    opcoes = [
+        OpcaoResultado(
+            opcao_id=o.id,
+            texto=o.texto,
+            total=contagens.get(o.id, 0),
+            percentual=round(contagens.get(o.id, 0) / respondentes * 100, 1) if respondentes else 0.0,
+        )
+        for o in p.opcoes
+    ]
+    media = None
+    if p.tipo == "escala" and respondentes:
+        # a opção de ordem 0 vale 1, a de ordem 1 vale 2, e assim por diante
+        soma = sum((i + 1) * contagens.get(o.id, 0) for i, o in enumerate(p.opcoes))
+        media = round(soma / respondentes, 2)
+    if p.tipo in ("unica", "multipla"):
+        opcoes.sort(key=lambda o: o.total, reverse=True)  # mais escolhidas primeiro (empates mantêm a ordem)
+    return PerguntaResultado(
+        pergunta_id=p.id, texto=p.texto, tipo=p.tipo, respondentes=respondentes, media=media, opcoes=opcoes
+    )
+
+
 @router.get("/{questionario_id}/resultados", response_model=ResultadosQuestionario)
 async def resultados(questionario_id: int, estabelecimento: CurrentEstabelecimento, db: DbSession):
+    """Resultados agregados do próprio lojista. As respostas são anônimas (sem nome, e-mail ou telefone),
+    então os números sempre aparecem; com poucas respostas vem apenas o aviso de amostra pequena."""
     q = await _do_dono(db, questionario_id, estabelecimento.id)
     total = await db.scalar(select(func.count(Resposta.id)).where(Resposta.questionario_id == q.id)) or 0
-    suprimido = total < settings.min_group_size  # poucas respostas: não exibe contagens (LGPD)
     contagens = dict((await db.execute(
         select(RespostaItem.opcao_id, func.count(RespostaItem.id))
         .join(Resposta, Resposta.id == RespostaItem.resposta_id)
         .where(Resposta.questionario_id == q.id)
         .group_by(RespostaItem.opcao_id)
     )).all())
-    perguntas = [
-        PerguntaResultado(
-            pergunta_id=p.id, texto=p.texto,
-            opcoes=[
-                OpcaoResultado(
-                    opcao_id=o.id, texto=o.texto,
-                    total=None if suprimido else contagens.get(o.id, 0),
-                    percentual=None if suprimido else round(contagens.get(o.id, 0) / total * 100, 1),
-                )
-                for o in p.opcoes
-            ],
-        )
-        for p in q.perguntas
-    ]
+    respondentes = dict((await db.execute(
+        select(RespostaItem.pergunta_id, func.count(func.distinct(RespostaItem.resposta_id)))
+        .join(Resposta, Resposta.id == RespostaItem.resposta_id)
+        .where(Resposta.questionario_id == q.id)
+        .group_by(RespostaItem.pergunta_id)
+    )).all())
     return ResultadosQuestionario(
-        questionario_id=q.id, total_respostas=total, suprimido=suprimido, perguntas=perguntas
+        questionario_id=q.id,
+        total_respostas=total,
+        amostra_pequena=total < settings.min_group_size,
+        minimo_recomendado=settings.min_group_size,
+        perguntas=[_resultado_pergunta(p, contagens, respondentes.get(p.id, 0)) for p in q.perguntas],
     )
 
 
 # ----------------------------- visitante (público) -----------------------------
-@public_router.get("/{questionario_id}", response_model=QuestionarioRead)
+@public_router.get("", response_model=list[QuestionarioPublicoResumo])
+async def listar_publicos(db: DbSession, visitante: VisitanteOpcional):
+    """Pesquisas ativas de todas as lojas parceiras, para o visitante ganhar mais pontos."""
+    linhas = (await db.execute(
+        select(Questionario, Estabelecimento.nome, Estabelecimento.segmento)
+        .join(Estabelecimento, Estabelecimento.id == Questionario.estabelecimento_id)
+        .where(Questionario.ativo.is_(True))
+        .order_by(Questionario.id.desc())
+        .limit(50)
+    )).all()
+    respondidos: set[int] = set()
+    if visitante is not None:
+        respondidos = set((await db.scalars(
+            select(Resposta.questionario_id).where(Resposta.visitante_id == visitante.id)
+        )).all())
+    multiplicador = sexta13.MULTIPLICADOR_PONTOS if sexta13.evento_ativo() else 1
+    return [
+        QuestionarioPublicoResumo(
+            id=q.id, titulo=q.titulo, descricao=q.descricao, loja=loja, segmento=segmento,
+            pontos=q.pontos, pontos_hoje=q.pontos * multiplicador,
+            total_perguntas=len(q.perguntas), segundos_estimados=len(q.perguntas) * SEGUNDOS_POR_PERGUNTA,
+            respondido=q.id in respondidos,
+        )
+        for q, loja, segmento in linhas
+    ]
+
+
+@public_router.get("/{questionario_id}", response_model=QuestionarioPublico)
 async def ver_publico(questionario_id: int, db: DbSession):
     q = await db.get(Questionario, questionario_id)
     if q is None or not q.ativo:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Questionário não encontrado")
-    return q
+    loja = await db.scalar(select(Estabelecimento.nome).where(Estabelecimento.id == q.estabelecimento_id))
+    return QuestionarioPublico.model_validate(q).model_copy(update={"loja": loja or ""})
 
 
 def _validar_respostas(q: Questionario, dados: RespostaCreate) -> None:
@@ -129,13 +182,22 @@ def _validar_respostas(q: Questionario, dados: RespostaCreate) -> None:
         pergunta = perguntas.get(r.pergunta_id)
         if pergunta is None or r.pergunta_id in respondidas:
             raise HTTPException(422, "Pergunta inválida ou repetida")
-        escolhidas = set(r.opcao_ids)
-        validas = {o.id for o in pergunta.opcoes}
-        if not escolhidas <= validas or (pergunta.tipo == "unica" and len(escolhidas) != 1):
+        opcoes = {o.id: o for o in pergunta.opcoes}
+        ids = r.opcao_ids
+        if len(set(ids)) != len(ids) or not set(ids) <= set(opcoes):
             raise HTTPException(422, "Opção inválida para a pergunta")
+        if pergunta.tipo != "multipla":
+            if len(ids) != 1:
+                raise HTTPException(422, "Escolha apenas uma opção")
+        else:
+            marcadas = [opcoes[i] for i in ids]
+            if len(marcadas) > 1 and any(o.exclusiva for o in marcadas):
+                raise HTTPException(422, "A opção exclusiva não pode ser combinada com outras")
+            if pergunta.max_selecoes and len(marcadas) > pergunta.max_selecoes:
+                raise HTTPException(422, f"Escolha no máximo {pergunta.max_selecoes} opções")
         respondidas.add(pergunta.id)
-    if respondidas != set(perguntas):
-        raise HTTPException(422, "Responda todas as perguntas")
+    if {p.id for p in q.perguntas if p.obrigatoria} - respondidas:
+        raise HTTPException(422, "Responda todas as perguntas obrigatórias")
 
 
 @public_router.post(

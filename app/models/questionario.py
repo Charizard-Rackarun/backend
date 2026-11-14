@@ -1,4 +1,4 @@
-from sqlalchemy import ForeignKey, String, UniqueConstraint
+from sqlalchemy import ForeignKey, String, UniqueConstraint, false, true
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, CriadoEm
@@ -26,9 +26,13 @@ class Pergunta(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     questionario_id: Mapped[int] = mapped_column(ForeignKey("questionarios.id"), index=True)
     texto: Mapped[str] = mapped_column(String(200))
-    tipo: Mapped[str] = mapped_column(String(10))  # "unica" | "multipla"
+    # "unica" | "multipla" | "escala" (1 a 5) | "sim_nao"
+    tipo: Mapped[str] = mapped_column(String(10))
     # Marca perguntas usadas na análise: "categoria" (interesses) ou "frequencia"
     dimensao: Mapped[str | None] = mapped_column(String(20))
+    obrigatoria: Mapped[bool] = mapped_column(default=True, server_default=true())
+    # Só para "multipla": máximo de opções que o visitante pode marcar (None = sem limite)
+    max_selecoes: Mapped[int | None]
     ordem: Mapped[int] = mapped_column(default=0)
 
     opcoes: Mapped[list["Opcao"]] = relationship(
@@ -42,6 +46,8 @@ class Opcao(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     pergunta_id: Mapped[int] = mapped_column(ForeignKey("perguntas.id"), index=True)
     texto: Mapped[str] = mapped_column(String(80))
+    # Opção exclusiva ("Nenhuma das anteriores"): não pode ser combinada com as demais
+    exclusiva: Mapped[bool] = mapped_column(default=False, server_default=false())
     ordem: Mapped[int] = mapped_column(default=0)
 
 
